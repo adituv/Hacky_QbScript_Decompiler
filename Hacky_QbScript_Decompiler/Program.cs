@@ -9,10 +9,11 @@ namespace Hacky_QbScript_Decompiler {
     using System.Reflection;
 
     class Program {
-        static Dictionary<byte, Func<BinaryReader,string>> translations = new Dictionary<byte, Func<BinaryReader, string>>()
+        #region opcode translations
+        static Dictionary<byte, Func<BinaryReader,string>> translations = new Dictionary<byte, Func<BinaryReader, string>>
         {
             { 0x01, (b) => "\r\n" },
-            { 0x03, (b) => "map {" },
+            { 0x03, (b) => "(map){" },
             { 0x04, (b) => "}" },
             { 0x05, (b) => "[" },
             { 0x06, (b) => "]" },
@@ -35,10 +36,10 @@ namespace Hacky_QbScript_Decompiler {
             },
             { 0x17, (b) => b.ReadInt32().ToString() },
             { 0x1A, (b) => { var bs = b.ReadBytes(4); var v = BitConverter.ToSingle(bs,0); return v.ToString(); } },
-            { 0x1B, (b) => { var len = (int) b.ReadUInt32(); var bs = b.ReadBytes(len); return Encoding.ASCII.GetChars(bs).ToString(); } },
-            { 0x1E, (b) => { var bs = b.ReadBytes(12); var v1 = BitConverter.ToSingle(bs,0); var v2 = BitConverter.ToSingle(bs,4);
-                             var v3 = BitConverter.ToSingle(bs,8); return string.Format("({0:R}, {1:R}, {2:R})", v1, v2, v3); } },
-            { 0x1F, (b) => { var bs = b.ReadBytes(8); var v1 = BitConverter.ToSingle(bs,0); var v2 = BitConverter.ToSingle(bs,4);
+            { 0x1B, (b) => { var len = (int) b.ReadUInt32(); var bs = b.ReadBytes(len); return "\"" + new string(Encoding.ASCII.GetChars(bs)) + "\""; } },
+            { 0x1E, (b) => { var v1 = b.ReadSingle(); var v2 = b.ReadSingle(); var v3 = b.ReadSingle();
+                             return string.Format("({0:R}, {1:R}, {2:R})", v1, v2, v3); } },
+            { 0x1F, (b) => { var v1 = b.ReadSingle(); var v2 = b.ReadSingle();
                              return string.Format("({0:R}, {1:R})", v1, v2); } },
             { 0x20, (b) => "while" },
             { 0x21, (b) => "wend" },
@@ -63,24 +64,135 @@ namespace Hacky_QbScript_Decompiler {
             { 0x48, (b) => { b.ReadBytes(2); return "else"; } },
             { 0x49, (b) => { b.ReadBytes(2); return "break"; } },
             { 0x4B, (b) => "*" },
-            { 0x4C, (b) => { var len = (int) b.ReadUInt32(); var bs = b.ReadBytes(len); return Encoding.BigEndianUnicode.GetChars(bs).ToString(); } },
+            { 0x4C, (b) => { var len = (int) b.ReadUInt32(); var bs = b.ReadBytes(len); return "L\"" + new string(Encoding.BigEndianUnicode.GetChars(bs)) + "\"";} },
             { 0x4A, translateQbStruct }
         };
+        #endregion
+        #region qbstructitem parsing
 
-        private static Dictionary<uint, string[]> debugNames; 
+        private static Dictionary<uint, Func<BinaryReader, uint, string>> structItemParsers = new Dictionary<uint, Func<BinaryReader, uint, string>>
+        {
+            { 0x8100, (br,pos) => {
+                var data = br.ReadBytes(4);
+                var n = BitConverter.ToInt32(data, 0);
+                return n.ToString();
+            } },
+            { 0x8200, (br,pos) => {
+                var data = br.ReadBytes(4);
+                var n = BitConverter.ToSingle(data, 0);
+                return n.ToString("R");
+            } },
+            { 0x8300, (br, pos) => {
+                var data = br.ReadBytes(8);
+                var stringStart = BitConverter.ToUInt32(data, 0);
+                var stringEnd = BitConverter.ToUInt32(data, 4);
 
-        static string translateQbStruct(BinaryReader br) {
-            StringBuilder sb;
+                if (stringStart < (pos + 8))
+                {
+                    throw new Exception("Data section occurs before header in Qb struct!");
+                }
+                else if (stringStart > pos + 8)
+                {
+                    br.ReadBytes((int)(stringStart - pos - 8));
+                }
+
+                var strData = br.ReadBytes((int)(stringEnd - stringStart));
+
+                return Encoding.ASCII.GetChars(strData).ToString();
+            } },
+        };
+        #endregion
+
+        private static Dictionary<uint, string[]> debugNames;
+
+        static byte[] swapEndianness(byte[] data)
+        {
+            return data.Reverse().ToArray();
+        }
+
+        static string translateQbStruct(BinaryReader br)
+        {
+            var sb = new StringBuilder();
             var len = br.ReadUInt16();
             byte b;
+            sb.AppendLine("(struct){");
             do {
                 b = br.ReadByte();
             } while (b == 0);
-            if(br.ReadByte() != 1 || br.ReadByte() != 0) {
+            if(b != 1 || br.ReadByte() != 0) {
                 throw new Exception("Invalid Qb struct");
             }
-            // Temp: skip qb struct data
             br.ReadBytes(len - 4);
+            /*
+            uint nextPos = br.ReadUInt32();
+            uint curPos = 8;
+            uint type, crc;
+            while (nextPos != 0)
+            {
+                if (curPos < nextPos)
+                {
+                    br.ReadBytes((int)(nextPos - curPos));
+                    curPos = nextPos;
+                }
+
+                uint dataStartPos;
+                byte[] data;
+                string valRep;
+                type = br.ReadUInt32();
+                crc = BitConverter.ToUInt32(swapEndianness(br.ReadBytes(4)), 0);
+                data = swapEndianness(br.ReadBytes(4));
+
+                switch (type)
+                {
+                    case 0x8100:
+                        valRep = BitConverter.ToInt32(data, 0).ToString();
+                        nextPos = BitConverter.ToUInt32(swapEndianness(br.ReadBytes(4)), 0);
+                        curPos += 16;
+                        break;
+                    case 0x8200:
+                        valRep = BitConverter.ToSingle(data, 0).ToString("R");
+                        nextPos = BitConverter.ToUInt32(swapEndianness(br.ReadBytes(4)), 0);
+                        curPos += 16;
+                        break;
+                    case 0x8300:
+                        curPos += 8;
+                        dataStartPos = BitConverter.ToUInt32(data, 0);
+                        nextPos = BitConverter.ToUInt32(swapEndianness(br.ReadBytes(4)), 0);
+                        if (dataStartPos > curPos)
+                        {
+                            br.ReadBytes((int)(dataStartPos - curPos));
+                            // curPos = dataStartPos;
+                        }
+                        data = br.ReadBytes((int)(nextPos - dataStartPos));
+                        curPos = nextPos;
+                        valRep = Encoding.ASCII.GetChars(data).ToString();
+                        break;
+                    case 0x8400:
+                        curPos += 8;
+                        dataStartPos = BitConverter.ToUInt32(data, 0);
+                        nextPos = BitConverter.ToUInt32(swapEndianness(br.ReadBytes(4)), 0);
+                        if (dataStartPos > curPos) {
+                            br.ReadBytes((int) (dataStartPos - curPos));
+                            // curPos = dataStartPos;
+                        }
+                        data = br.ReadBytes((int) (nextPos - dataStartPos));
+                        curPos = nextPos;
+                        valRep = Encoding.BigEndianUnicode.GetChars(data).ToString();
+                        break;
+                    case 0x8500:
+                        curPos += 8;
+                        dataStartPos = BitConverter.ToUInt32(data, 0);
+                        nextPos = BitConverter.ToUInt32(swapEndianness(br.ReadBytes(4)), 0);
+                        if (dataStartPos > curPos) {
+                            br.ReadBytes((int) (dataStartPos - curPos));
+                            curPos = dataStartPos;
+                        }
+                        if (br.ReadUInt32() != 0x100) throw new Exception("Expecting float array start; not found.");
+                        data = br.ReadBytes(4);
+
+
+                }
+            }*/
             return "(Qb Struct)";
         }
 
@@ -125,7 +237,6 @@ namespace Hacky_QbScript_Decompiler {
                 return result;
             }
         }
-
 
         static int Main(string[] args) {
             if(args.Length < 2) {
