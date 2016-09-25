@@ -5,10 +5,13 @@ using System.IO;
 using System.Text;
 
 namespace Hacky_QbScript_Decompiler {
+    using System.Linq;
+    using System.Reflection;
+
     class Program {
         static Dictionary<byte, Func<BinaryReader,string>> translations = new Dictionary<byte, Func<BinaryReader, string>>()
         {
-            { 0x01, (b) => "\n" },
+            { 0x01, (b) => "\r\n" },
             { 0x03, (b) => "map {" },
             { 0x04, (b) => "}" },
             { 0x05, (b) => "[" },
@@ -25,7 +28,11 @@ namespace Hacky_QbScript_Decompiler {
             { 0x13, (b) => "<=" },
             { 0x14, (b) => ">" },
             { 0x15, (b) => ">=" },
-            { 0x16, (b) => { var k = b.ReadUInt32(); return "$" + k; } },
+            { 0x16, (b) => {
+                var k = b.ReadUInt32();
+                if (debugNames.ContainsKey(k)) return debugNames[k][0];
+                else return "$" + k.ToString("X8");}
+            },
             { 0x17, (b) => b.ReadInt32().ToString() },
             { 0x1A, (b) => { var bs = b.ReadBytes(4); var v = BitConverter.ToSingle(bs,0); return v.ToString(); } },
             { 0x1B, (b) => { var len = (int) b.ReadUInt32(); var bs = b.ReadBytes(len); return Encoding.ASCII.GetChars(bs).ToString(); } },
@@ -43,7 +50,7 @@ namespace Hacky_QbScript_Decompiler {
             { 0x28, (b) => "endif" },
             { 0x29, (b) => "return" },
             { 0x2C, (b) => "{PASSTHROUGH}" },
-            { 0x2D, (b) => "%" },
+            { 0x2D, (b) => "local" },
             { 0x39, (b) => "!" },
             { 0x3A, (b) => "&" },
             { 0x3B, (b) => "|" },
@@ -57,8 +64,10 @@ namespace Hacky_QbScript_Decompiler {
             { 0x49, (b) => { b.ReadBytes(2); return "break"; } },
             { 0x4B, (b) => "*" },
             { 0x4C, (b) => { var len = (int) b.ReadUInt32(); var bs = b.ReadBytes(len); return Encoding.BigEndianUnicode.GetChars(bs).ToString(); } },
-            { 0x4A, (b) => translateQbStruct(b) }
+            { 0x4A, translateQbStruct }
         };
+
+        private static Dictionary<uint, string[]> debugNames; 
 
         static string translateQbStruct(BinaryReader br) {
             StringBuilder sb;
@@ -75,13 +84,58 @@ namespace Hacky_QbScript_Decompiler {
             return "(Qb Struct)";
         }
 
+        static Dictionary<uint, string[]> LoadDebugItems() {
+            var assembly = Assembly.GetExecutingAssembly();
+            var resourceStream = assembly.GetManifestResourceStream("Hacky_QbScript_Decompiler.dbg_extra.pak.xen");
+            if (resourceStream == null) throw new NullReferenceException("Failed to load the debug names");
+
+            var tempResult = new Dictionary<uint, List<string>>();
+            var result = new Dictionary<uint, string[]>();
+
+            using (var sr = new StreamReader(resourceStream)) {
+                while (!sr.EndOfStream) {
+                    string[] parts = sr.ReadLine().Split(' ');
+                    if (parts.Length <= 1) {
+                        continue;
+                    }
+
+                    uint key;
+
+                    try {
+                        // tryparse is messy because of stripping the hex specifier
+                        key = Convert.ToUInt32(parts[0], 16);
+                    } catch {
+                        continue;
+                    }
+
+                    var value = string.Join(" ", parts.Skip(1)).ToLowerInvariant();
+                    if (!tempResult.ContainsKey(key)) {
+                        tempResult.Add(key, new List<string>());
+                    }
+                    tempResult[key].Add(value);
+                }
+
+                //Get only distinct values.  Differences occur generally when a key is used for a file path as well
+                //as the file name even when the checksum is not actually that of the file path.
+                foreach (var kv in tempResult) {
+                    kv.Value.Sort();
+                    result.Add(kv.Key, kv.Value.Distinct().ToArray());
+                }
+
+                return result;
+            }
+        }
+
+
         static int Main(string[] args) {
             if(args.Length < 2) {
                 Console.WriteLine("Usage: {0} inputfile outputfile", Process.GetCurrentProcess().ProcessName);
                 return 1;
             }
 
-            try {
+            try
+            {
+                debugNames = LoadDebugItems();
                 using (var inf = File.OpenRead(args[0]))
                 using (var of = File.OpenWrite(args[1]))
                 using (var inb = new BinaryReader(inf))
